@@ -20,8 +20,17 @@ class CondominiumController extends Controller
         $data = $request->validate($rules); $record = $id ? $model::findOrFail($id) : new $model;
         $record->fill($data)->save(); return response()->json(['message' => $id ? 'Registro actualizado.' : 'Registro creado.', 'data' => $record->load($with)], $id ? 200 : 201);
     }
-    public function homes(Request $r) { return $this->listing($r, Home::class); }
-    public function showHome(Home $home) { return response()->json(['data' => $home]); }
+    public function homes(Request $r) {
+        if ($r->user()?->role?->role === 'Residente') {
+            $homeId = Resident::where('user_id', $r->user()->id)->value('home_id');
+            return response()->json(Home::whereKey($homeId)->latest()->paginate($r->integer('per_page', 15)));
+        }
+        return $this->listing($r, Home::class);
+    }
+    public function showHome(Request $r, Home $home) {
+        if ($r->user()?->role?->role === 'Residente' && (int) Resident::where('user_id', $r->user()->id)->value('home_id') !== $home->id) abort(403);
+        return response()->json(['data' => $home]);
+    }
     public function storeHome(Request $r) { return $this->crud($r, null, Home::class, ['code'=>'required|string|max:30|unique:homes,code','block'=>'nullable|string|max:30','address'=>'required|string|max:255','status'=>'required|in:active,inactive']); }
     public function updateHome(Request $r, Home $home) { return $this->crud($r, $home->id, Home::class, ['code'=>['required','string','max:30',Rule::unique('homes','code')->ignore($home)],'block'=>'nullable|string|max:30','address'=>'required|string|max:255','status'=>'required|in:active,inactive']); }
     public function destroyHome(Home $home) { $home->delete(); return response()->noContent(); }
@@ -38,7 +47,10 @@ class CondominiumController extends Controller
         }
         return $this->listing($r, Visit::class, ['home','resident']);
     }
-    public function showVisit(Visit $visit) { return response()->json(['data' => $visit->load('home', 'resident')]); }
+    public function showVisit(Request $r, Visit $visit) {
+        if ($r->user()?->role?->role === 'Residente' && $visit->resident?->user_id !== $r->user()->id) abort(403);
+        return response()->json(['data' => $visit->load('home', 'resident')]);
+    }
     public function storeVisit(Request $r) {
         $data = $r->validate($this->visitRules());
         if ($r->user()?->role?->role === 'Residente') {
@@ -62,7 +74,19 @@ class CondominiumController extends Controller
     public function updatePayment(Request $r, Payment $payment) { return $this->crud($r, $payment->id, Payment::class, $this->paymentRules($payment), ['home']); }
     public function destroyPayment(Payment $payment) { $payment->delete(); return response()->noContent(); }
     private function paymentRules(?Payment $payment=null): array { return ['home_id'=>'required|exists:homes,id','period'=>['required','date_format:Y-m',Rule::unique('payments')->where(fn($q)=>$q->where('home_id',request('home_id')))->ignore($payment)],'due_date'=>'required|date','amount'=>'required|numeric|min:0.01','reference'=>'nullable|string|max:100','status'=>'sometimes|in:pending,paid,overdue']; }
-    public function pay(Payment $payment) { if ($payment->status === 'paid') return response()->json(['message'=>'La cuota ya fue pagada.'], 422); $payment->update(['status'=>'paid','paid_at'=>now()]); return response()->json(['data'=>$payment]); }
+    public function pay(Payment $payment) {
+        if ($payment->status === 'paid') return response()->json(['message'=>'La cuota ya fue pagada.'], 422);
+        $payment->update(['status'=>'paid','paid_at'=>now()]);
+        $payment->load('home');
+        return response()->json(['message' => 'Pago registrado.', 'data' => $payment, 'invoice' => [
+            'number' => 'CON-'.str_pad((string) $payment->id, 6, '0', STR_PAD_LEFT),
+            'issued_at' => $payment->paid_at?->toIso8601String(),
+            'home' => ['code' => $payment->home?->code, 'address' => $payment->home?->address],
+            'period' => $payment->period,
+            'reference' => $payment->reference,
+            'amount' => $payment->amount,
+        ]]);
+    }
     public function incidents(Request $r) { return $this->listing($r, Incident::class, ['home','reporter']); }
     public function showIncident(Incident $incident) { return response()->json(['data' => $incident->load('home', 'reporter')]); }
     public function storeIncident(Request $r)
